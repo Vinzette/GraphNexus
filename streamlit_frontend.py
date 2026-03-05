@@ -1,20 +1,33 @@
 import streamlit as st
 from langgraph_backend import chatbot
 from langchain_core.messages import HumanMessage
+import uuid
 
-# st.session_state -> dict -> 
-CONFIG = {'configurable': {'thread_id': 'thread-1'}}
+#utility function
+def generate_thread_id():
+    thread_id = uuid.uuid4()
+    return thread_id
 
+#SET UP A SESSION
 if 'message_history' not in st.session_state:
     st.session_state['message_history'] = []
+
+if 'thread_id' not in st.session_state:
+    st.session_state['thread_id'] = generate_thread_id()
+
+#sidebar UI
+st.sidebar.title("GraphNexus")
+
+st.sidebar.button('New Chat')
+
+st.sidebar.header('My Conversations')
+
+st.sidebar.text(st.session_state['thread_id'])
 
 # loading the conversation history
 for message in st.session_state['message_history']:
     with st.chat_message(message['role']):
         st.text(message['content'])
-
-#{'role': 'user', 'content': 'Hi'}
-#{'role': 'assistant', 'content': 'Hi=ello'}
 
 user_input = st.chat_input('Type here')
 
@@ -24,12 +37,9 @@ if user_input:
     st.session_state['message_history'].append({'role': 'user', 'content': user_input})
     with st.chat_message('user'):
         st.text(user_input)
-
-    # response = chatbot.invoke({'messages': [HumanMessage(content=user_input)]}, config=CONFIG)
     
-    # ai_message = response['messages'][-1].content
-    # first add the message to message_history
-    # st.session_state['message_history'].append({'role': 'assistant', 'content': ai_message})
+    CONFIG = {'configurable': {'thread_id': st.session_state['thread_id']}}
+
     with st.chat_message('assistant'):
         ai_message=st.write_stream(
             message_chunk.content for message_chunk, metadata in chatbot.stream(
