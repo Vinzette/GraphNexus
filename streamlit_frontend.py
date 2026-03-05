@@ -3,10 +3,15 @@ from langgraph_backend import chatbot
 from langchain_core.messages import HumanMessage
 import uuid
 
-#utility function
+#utility functions
 def generate_thread_id():
     thread_id = uuid.uuid4()
     return thread_id
+
+def reset_chat():
+    thread_id = generate_thread_id()
+    st.session_state['thread_id'] = thread_id
+    st.session_state['message_history'] = []
 
 #SET UP A SESSION
 if 'message_history' not in st.session_state:
@@ -18,7 +23,8 @@ if 'thread_id' not in st.session_state:
 #sidebar UI
 st.sidebar.title("GraphNexus")
 
-st.sidebar.button('New Chat')
+if st.sidebar.button('New Chat'):
+    reset_chat()
 
 st.sidebar.header('My Conversations')
 
