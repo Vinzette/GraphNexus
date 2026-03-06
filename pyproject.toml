@@ -10,6 +10,7 @@ dependencies = [
     "langchain-core>=1.2.16",
     "langchain-openai>=1.1.10",
     "langgraph>=1.0.10",
+    "langgraph-checkpoint-sqlite>=3.0.3",
     "python-dotenv>=1.2.2",
     "streamlit>=1.55.0",
 ]

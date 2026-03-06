@@ -3,8 +3,9 @@ from typing import TypedDict, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from dotenv import load_dotenv
+import sqlite3
 
 load_dotenv()
 
@@ -25,8 +26,9 @@ def chat_node(state: ChatState):
     # append back to history
     return {"messages": [response]}
 
+conn = sqlite3.connect(database='chatbot.db', check_same_thread=False) #same db will be used in diff threads
+checkpointer = SqliteSaver(conn=conn)
 
-checkpointer = MemorySaver()
 graph = StateGraph(ChatState)
 # adding nodes
 graph.add_node("chat_node", chat_node)
@@ -34,6 +36,12 @@ graph.add_node("chat_node", chat_node)
 graph.add_edge(START, "chat_node")
 graph.add_edge("chat_node", END)
 chatbot = graph.compile(checkpointer=checkpointer)
+
+def retrieve_all_threads():
+    all_threads= set()
+    for checkpoint in checkpointer.list(None): #give checkpoints for not a specific id
+        all_threads.add(checkpoint.config['configurable']['thread_id'])
+    return list(all_threads)
 
 initial_state = {"messages": [HumanMessage(content="What is the capital of Japan")]}
 
