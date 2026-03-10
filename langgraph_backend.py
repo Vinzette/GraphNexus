@@ -3,23 +3,42 @@ from typing import TypedDict, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.sqlite import SqliteSaver
+# from langgraph.checkpoint.sqlite import SqliteSaver
 from dotenv import load_dotenv
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langchain_mcp_adapters.client import MultiServerMCPClient
 import sqlite3
 import os
+import asyncio
+import aiosqlite
+import threading
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.tools import tool
+from langchain_core.tools import tool, BaseTool
 import requests # is used for making HTTP requests (e.g., GET, POST) to web services and APIs.
 
 load_dotenv()
 
+#async
+# Dedicated async loop for backend tasks
+_ASYNC_LOOP = asyncio.new_event_loop()
+_ASYNC_THREAD = threading.Thread(target=_ASYNC_LOOP.run_forever, daemon=True)
+_ASYNC_THREAD.start()
 
-class ChatState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+
+def _submit_async(coro):
+    return asyncio.run_coroutine_threadsafe(coro, _ASYNC_LOOP)
 
 
-llm = ChatOpenAI()
+def run_async(coro):
+    return _submit_async(coro).result()
+
+
+def submit_async_task(coro):
+    """Schedule a coroutine on the backend event loop."""
+    return _submit_async(coro)
+
+llm = ChatOpenAI(model='gpt-5')
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 
 # Tools
@@ -68,26 +87,49 @@ def get_stock_price(symbol: str) -> dict:
     r = requests.get(url)
     return r.json()
 
+#MCP
+# Initialize the client
+client = MultiServerMCPClient(
+    {
+        "fetch": {
+            "transport": "streamable_http",
+            "url": "https://remote.mcpservers.org/fetch/mcp"
+        }
+    }
+)
+
+def load_mcp_tools() -> list[BaseTool]:
+    try:
+        return run_async(client.get_tools())
+    except Exception:
+        return []
 
 
-tools = [search_tool, get_stock_price, calculator]
+mcp_tools = load_mcp_tools()
+
+tools = [search_tool, get_stock_price, calculator, *mcp_tools]
 llm_with_tools = llm.bind_tools(tools)
 
+class ChatState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
 
 # node def
-def chat_node(state: ChatState):
+async def chat_node(state: ChatState):
     """LLM node that may answer or request a tool call."""
     # take user query
     messages = state["messages"]
     # seed to llm
-    response = llm_with_tools.invoke(messages)
+    response = await llm_with_tools.ainvoke(messages)
     # append back to history
     return {"messages": [response]}
 
-tool_node =  ToolNode(tools)
+tool_node =  ToolNode(tools) 
 
-conn = sqlite3.connect(database='chatbot.db', check_same_thread=False) #same db will be used in diff threads
-checkpointer = SqliteSaver(conn=conn)
+async def _init_checkpointer():
+    conn = await aiosqlite.connect(database='chatbot.db')
+    return AsyncSqliteSaver(conn)
+
+checkpointer = run_async(_init_checkpointer())
 
 graph = StateGraph(ChatState)
 # adding nodes
@@ -99,11 +141,16 @@ graph.add_conditional_edges("chat_node", tools_condition)
 graph.add_edge('tools', 'chat_node')
 chatbot = graph.compile(checkpointer=checkpointer)
 
-def retrieve_all_threads():
-    all_threads= set()
-    for checkpoint in checkpointer.list(None): #give checkpoints for not a specific id
-        all_threads.add(checkpoint.config['configurable']['thread_id'])
+#helper
+async def _alist_threads():
+    all_threads = set()
+    async for checkpoint in checkpointer.alist(None):
+        all_threads.add(checkpoint.config["configurable"]["thread_id"])
     return list(all_threads)
+
+
+def retrieve_all_threads():
+    return run_async(_alist_threads())
 
 # initial_state = {"messages": [HumanMessage(content="What is the capital of Japan")]}
 
