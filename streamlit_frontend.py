@@ -1,6 +1,13 @@
 import queue
 import streamlit as st
 from langgraph_backend import chatbot, retrieve_all_threads, submit_async_task
+from langgraph_backend import (
+    chatbot,
+    retrieve_all_threads,
+    submit_async_task,
+    ingest_pdf,
+    get_thread_metadata,
+)
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import uuid
 
@@ -43,6 +50,7 @@ if "thread_id" not in st.session_state:
 
 if "chat_threads" not in st.session_state:
     st.session_state["chat_threads"] = retrieve_all_threads()
+
 add_thread(st.session_state["thread_id"])
 
 # sidebar UI
@@ -53,8 +61,38 @@ if st.sidebar.button("New Chat"):
 
 st.sidebar.header("My Conversations")
 
+# --- Document Context Section ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("Document Context")
+
+# 1. Check if the current thread already has a file
+current_thread_id = str(st.session_state["thread_id"])
+metadata = get_thread_metadata(current_thread_id)
+
+if metadata:
+    st.sidebar.success(
+        f"📄 **Active:** {metadata.get('filename')}\n"
+        f"Analyzed {metadata.get('documents')} pages ({metadata.get('chunks')} chunks)"
+    )
+else:
+    st.sidebar.info("No document uploaded for this chat.")
+
+# 2. File Uploader with Dynamic Key (resets when thread changes)
+uploaded_file = st.sidebar.file_uploader(
+    "Upload PDF", type=["pdf"], key=f"uploader_{current_thread_id}"
+)
+
+if uploaded_file:
+    # Only process if we haven't already (or if it's a new file)
+    # Note: ingest_pdf is fast enough to run directly; for larger files, a spinner helps.
+    if not metadata or metadata.get("filename") != uploaded_file.name:
+        with st.sidebar.status("Indexing document...", expanded=True):
+            ingest_pdf(uploaded_file.getvalue(), current_thread_id, uploaded_file.name)
+        st.rerun()
+
 for thread_id in st.session_state["chat_threads"][::-1]:
-    if st.sidebar.button(str(thread_id)):
+    # Highlight the current thread in the list or just show buttons
+    if st.sidebar.button(str(thread_id), key=f"thread_btn_{thread_id}"):
         st.session_state["thread_id"] = thread_id
         messages = load_conversation(thread_id)
 
@@ -75,22 +113,20 @@ for message in st.session_state["message_history"]:
     with st.chat_message(message["role"]):
         st.text(message["content"])
 
-user_input = st.chat_input("Type here")
-
-if user_input:
-    # first add the message to message_history
+if user_input := st.chat_input("Type here"):
+    # 1. Display user message immediately
     st.session_state["message_history"].append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.text(user_input)
 
-    # CONFIG = {'configurable': {'thread_id': st.session_state['thread_id']}}
+    # 2. Prepare Config
     CONFIG = {
         "configurable": {"thread_id": st.session_state["thread_id"]},
         "metadata": {"thread_id": st.session_state["thread_id"]},
         "run_name": "chat_turn",
     }
 
-    # Assistant streaming block
+    # 3. Stream Assistant Response
     with st.chat_message("assistant"):
         # Use a mutable holder so the generator can set/modify it
         status_holder = {"box": None}
@@ -100,6 +136,7 @@ if user_input:
 
             async def run_stream():
                 try:
+                    # Stream both content and metadata to handle ToolMessages
                     async for message_chunk, metadata in chatbot.astream(
                         {"messages": [HumanMessage(content=user_input)]},
                         config=CONFIG,
@@ -119,34 +156,36 @@ if user_input:
                     break
                 message_chunk, metadata = item
                 if message_chunk == "error":
-                    raise metadata
+                    st.error(f"Error: {metadata}")
+                    break
 
-                # Lazily create & update the SAME status container when any tool runs
+                # Handling Tool Updates
                 if isinstance(message_chunk, ToolMessage):
                     tool_name = getattr(message_chunk, "name", "tool")
                     if status_holder["box"] is None:
                         status_holder["box"] = st.status(
-                            f"🔧 Using `{tool_name}` …", expanded=True
+                            f"🔧 Using `{tool_name}` ...", expanded=True
                         )
                     else:
                         status_holder["box"].update(
-                            label=f"🔧 Using `{tool_name}` …",
+                            label=f"🔧 Using `{tool_name}` ...",
                             state="running",
                             expanded=True,
                         )
 
-                # Stream ONLY assistant tokens
+                # Yielding Content Tokens
                 if isinstance(message_chunk, AIMessage):
                     yield message_chunk.content
 
         ai_message = st.write_stream(ai_only_stream())
 
-        # Finalize only if a tool was actually used
+        # Close status box if it was opened
         if status_holder["box"] is not None:
             status_holder["box"].update(
                 label="✅ Tool finished", state="complete", expanded=False
             )
 
+    # 4. Save Assistant message to history
     st.session_state["message_history"].append(
         {"role": "assistant", "content": ai_message}
     )
