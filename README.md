@@ -1,215 +1,159 @@
 # GraphNexus
 
-A multi-session AI chatbot built with **LangGraph** and **Streamlit**. GraphNexus provides persistent, tool-augmented conversations with real-time streaming — all running locally.
+An AI-powered multi-tool chatbot built with [LangGraph](https://github.com/langchain-ai/langgraph) and [Streamlit](https://streamlit.io). GraphNexus gives you a persistent, multi-session conversational assistant that can search the web, query your PDFs, look up stock prices, do math, and fetch web pages — all from a clean chat interface.
 
 ---
 
 ## Features
 
-- **Persistent sessions** — every conversation is stored in a local SQLite database and survives app restarts
-- **Multi-thread management** — each chat gets a unique UUID thread ID; switch between past conversations from the sidebar
-- **Live streaming** — assistant tokens appear word-by-word via an async queue bridge
-- **Tool use** — the model can call web search, a calculator, stock price lookup, and a remote MCP fetch tool mid-conversation
-- **Async-safe architecture** — a dedicated background event loop decouples LangGraph's async runtime from Streamlit's synchronous rendering
+- **Multi-session chat** — create multiple independent conversation threads, each persisted across restarts via SQLite
+- **RAG over PDFs** — upload a PDF per thread and ask questions about its contents; answers are grounded in the actual document
+- **Web search** — live DuckDuckGo search for up-to-date information the model wasn't trained on
+- **Stock prices** — real-time stock quotes via Alpha Vantage (e.g. `What's the price of AAPL?`)
+- **Calculator** — reliable arithmetic via a dedicated tool so the LLM never guesses
+- **Web page fetching** — fetch and read arbitrary URLs via a remote MCP server
+- **Streaming responses** — token-by-token streaming with live tool-use status indicators
+- **LangSmith tracing** — optional observability for every agent run
 
 ---
 
-## Tools
+## Tech Stack
 
-| Tool                | Description                                            |
-| ------------------- | ------------------------------------------------------ |
-| `duckduckgo_search` | General web search via DuckDuckGo                      |
-| `calculator`        | Arithmetic operations: add, subtract, multiply, divide |
-| `get_stock_price`   | Live stock quotes via Alpha Vantage                    |
-| `fetch` _(MCP)_     | Fetch any webpage and return its content as Markdown   |
-
-The `fetch` tool is loaded dynamically from a remote MCP server (`streamable_http` transport) using `langchain-mcp-adapters`.
+| Layer                    | Technology                              |
+| ------------------------ | --------------------------------------- |
+| LLM                      | OpenAI `gpt-5`                          |
+| Embeddings               | OpenAI `text-embedding-3-small`         |
+| Agent orchestration      | LangGraph (`StateGraph`)                |
+| Conversation persistence | LangGraph + `AsyncSqliteSaver` (SQLite) |
+| Vector search (RAG)      | FAISS (in-memory, per-thread)           |
+| Web search               | DuckDuckGo (`langchain-community`)      |
+| Stock data               | Alpha Vantage REST API                  |
+| Web fetching             | MCP via `langchain-mcp-adapters`        |
+| Frontend                 | Streamlit                               |
+| Package manager          | [`uv`](https://github.com/astral-sh/uv) |
+| Python                   | 3.12                                    |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│         Streamlit Frontend       │
-│                                  │
-│  Sidebar ──► Thread selector     │
-│  Chat UI ──► st.write_stream     │
-│                  │               │
-│           Queue bridge           │
-└──────────────────┼───────────────┘
-                   │  submit_async_task()
-┌──────────────────▼───────────────┐
-│        Background Async Loop      │
-│                                  │
-│  ┌──────────────────────────┐    │
-│  │      LangGraph Graph      │    │
-│  │                          │    │
-│  │  START ──► chat_node      │    │
-│  │              │            │    │
-│  │         tools_condition   │    │
-│  │           ↙       ↘      │    │
-│  │     [END]      tools node │    │
-│  │                  │        │    │
-│  │              chat_node ◄──┘    │
-│  └──────────────────────────┘    │
-│                                  │
-│  AsyncSqliteSaver (chatbot.db)   │
-└──────────────────────────────────┘
+streamlit_frontend.py
+  └── langgraph_backend.py
+        ├── StateGraph
+        │     ├── chat_node  — GPT-5 with all tools bound
+        │     ├── tools node — ToolNode executing tool calls
+        │     └── AsyncSqliteSaver — persists state to chatbot.db
+        │
+        ├── Tools
+        │     ├── rag_tool          — per-thread FAISS retriever
+        │     ├── DuckDuckGoSearch  — live web search
+        │     ├── get_stock_price   — Alpha Vantage REST
+        │     ├── calculator        — arithmetic operations
+        │     └── MCP fetch tools   — remote.mcpservers.org
+        │
+        └── RAG Pipeline
+              ├── PyPDFLoader
+              ├── RecursiveCharacterTextSplitter (1000 chars, 200 overlap)
+              └── FAISS + OpenAIEmbeddings
 ```
 
-### Backend (`langgraph_backend.py`)
+The agent runs on a dedicated background asyncio event loop in a daemon thread, bridged to Streamlit's synchronous execution context via a thread-safe `queue.Queue`. This keeps the UI responsive while the agent processes tool calls asynchronously.
 
-The LangGraph graph has two nodes:
+---
 
-- **`chat_node`** — calls the model asynchronously with full message history; the model may respond directly or emit tool calls
-- **`tools`** — a `ToolNode` that executes any requested tools and appends results back into the message state
+## Prerequisites
 
-State is checkpointed to `chatbot.db` via `AsyncSqliteSaver`, keyed by `thread_id`. A daemon thread runs a persistent `asyncio` event loop, allowing the synchronous Streamlit process to dispatch coroutines safely.
+- Python 3.12
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) package manager
 
-### Frontend (`streamlit_frontend.py`)
+---
 
-The Streamlit UI handles session management and rendering:
+## Installation
 
-- New chats generate a UUID thread ID
-- Past threads are fetched from the checkpoint store on startup and listed in the sidebar
-- When the model invokes a tool, a live `st.status` widget is shown and updated in real time
-- Assistant tokens are yielded through a `queue.Queue` and consumed by `st.write_stream`
+```bash
+git clone https://github.com/your-username/GraphNexus.git
+cd GraphNexus
+
+# Install all dependencies
+uv sync
+```
+
+---
+
+## Configuration
+
+Create a `.env` file in the project root:
+
+```env
+# Required
+OPENAI_API_KEY=sk-...
+ALPHAVANTAGE_API_KEY=...
+
+# Optional — enables LangSmith tracing
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+LANGCHAIN_API_KEY=ls__...
+LANGSMITH_PROJECT=GraphNexus
+```
+
+Get your API keys:
+
+- **OpenAI** — [platform.openai.com](https://platform.openai.com)
+- **Alpha Vantage** — [alphavantage.co](https://www.alphavantage.co/support/#api-key) (free tier available)
+- **LangSmith** — [smith.langchain.com](https://smith.langchain.com) (optional)
+
+---
+
+## Running the App
+
+```bash
+uv run streamlit run streamlit_frontend.py
+```
+
+Then open [http://localhost:8501](http://localhost:8501) in your browser.
+
+---
+
+## Usage
+
+### Chat
+
+Type any message in the chat input. The agent automatically decides which tools to use based on your question. A status indicator shows when a tool is active.
+
+### PDF Question Answering
+
+1. Open the **sidebar** and expand the PDF section for your current thread
+2. Upload a PDF file — it will be parsed, chunked, and indexed automatically
+3. Ask questions about it in the chat; the agent's `rag_tool` retrieves the most relevant passages
+
+### Thread Management
+
+- Click **New Chat** in the sidebar to start a fresh conversation thread
+- Previous threads are listed by creation time; click any to resume it
+- All threads and their full message histories persist in `chatbot.db`
+
+### Example Prompts
+
+```
+What's the current price of Tesla stock?
+Search the web for the latest news on AI regulation.
+What does the uploaded document say about X?
+What is 1234 * 5678?
+Fetch and summarize https://example.com
+```
 
 ---
 
 ## Project Structure
 
 ```
-graphnexus/
-├── langgraph_backend.py   # Graph definition, tools, async loop, SQLite checkpointer
-├── streamlit_frontend.py  # Streamlit UI and async streaming bridge
-├── pyproject.toml         # Project metadata and dependencies
-├── chatbot.db             # SQLite database (created on first run)
-└── .env                   # API keys (not committed)
+GraphNexus/
+├── langgraph_backend.py   # Agent graph, tools, RAG pipeline, async event loop
+├── streamlit_frontend.py  # Streamlit UI, streaming, thread management
+├── pyproject.toml         # Dependencies and project metadata
+├── uv.lock                # Pinned dependency tree
+├── .env                   # API keys (not committed)
+├── .python-version        # Pins Python 3.12
+└── chatbot.db             # SQLite conversation store (auto-created, not committed)
 ```
-
----
-
-## Quick Start
-
-### 1. Install dependencies
-
-This project uses [`uv`](https://docs.astral.sh/uv/).
-
-```bash
-uv sync
-```
-
-### 2. Configure environment variables
-
-Create a `.env` file in the project root:
-
-```env
-OPENAI_API_KEY=your_openai_api_key
-ALPHAVANTAGE_API_KEY=your_alpha_vantage_api_key
-```
-
-| Variable               | Required | Notes                                                                                                                         |
-| ---------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`       | Yes      | Powers the `gpt-5` chat model                                                                                                 |
-| `ALPHAVANTAGE_API_KEY` | No       | Required only for the `get_stock_price` tool. Get one free at [alphavantage.co](https://www.alphavantage.co/support/#api-key) |
-
-### 3. Run the app
-
-```bash
-uv run streamlit run streamlit_frontend.py
-```
-
-Navigate to `http://localhost:8501` in your browser.
-
----
-
-## Tech Stack
-
-| Layer              | Technology                                                                         |
-| ------------------ | ---------------------------------------------------------------------------------- |
-| Orchestration      | [LangGraph](https://github.com/langchain-ai/langgraph)                             |
-| LLM & tool binding | [LangChain](https://github.com/langchain-ai/langchain) + OpenAI (`gpt-5`)          |
-| UI                 | [Streamlit](https://streamlit.io)                                                  |
-| Persistence        | SQLite via `aiosqlite` + `AsyncSqliteSaver`                                        |
-| MCP integration    | [`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-adapters) |
-| Package management | [`uv`](https://docs.astral.sh/uv/)                                                 |
-
----
-
-## Example Prompts
-
-- `Search for the latest news on quantum computing`
-- `What is AAPL trading at right now?`
-- `Calculate 847 divided by 13`
-- `Fetch https://example.com and summarize it`
-- `What's 15% of 2340, and then search for the best savings accounts?`
-- `Search for the latest news about Nvidia.`
-- `Calculate 42 * 19.`
-- `Get the latest stock price for AAPL.`
-- `Use the fetch tool to fetch https://www.anthropic.com/engineering/code-execution-with-mcp and summarize it.`
-
-## Async Design Notes
-
-This project uses async components in the backend and a synchronous UI in the frontend. The important pieces are:
-
-- `chat_node` uses `ainvoke(...)`
-- SQLite checkpointing uses `AsyncSqliteSaver`
-- thread restoration uses `aget_state(...)`
-- streamed messages use `astream(...)`
-- the frontend bridges async work through `submit_async_task(...)` and a queue
-
-That design avoids blocking the Streamlit app while still supporting async LangGraph execution.
-
-## Persistence Model
-
-Every conversation is stored in `chatbot.db` using LangGraph checkpoints.
-
-- Starting a new chat creates a new thread ID
-- Reopening the app preserves old conversations
-- Selecting a thread from the sidebar restores its message history
-
-## MCP Fetch Support
-
-The project connects to a remote MCP server for the `fetch` tool:
-
-- endpoint: `https://remote.mcpservers.org/fetch/mcp`
-- transport: `streamable_http`
-
-This tool is useful when you want the assistant to retrieve webpage content as structured markdown instead of relying only on normal chat knowledge.
-
-## Requirements
-
-- Python 3.12+
-- Internet access for OpenAI, DuckDuckGo search, Alpha Vantage, and the remote MCP fetch server
-
-## Troubleshooting
-
-### `ModuleNotFoundError` for MCP adapters
-
-Install project dependencies again:
-
-```bash
-uv sync
-```
-
-### Fetch tool is not available
-
-Check the following:
-
-- `langchain-mcp-adapters` is installed
-- the remote MCP endpoint is reachable from your network
-- the backend is using `streamable_http` for the fetch transport
-- you restarted the app after changing backend tool configuration
-
-### Stock tool returns an error
-
-Make sure `ALPHAVANTAGE_API_KEY` is present in `.env`.
-
-## Roadmap Ideas
-
-- Add better tool result rendering in the UI
-- Add structured logging for MCP and tool-loading failures
-- Add tests around thread restoration and streaming behavior
-- Add deployment instructions for hosting the app beyond local development

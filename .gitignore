@@ -12,3 +12,10 @@ wheels/
 *.db
 *.db-shm
 *.db-wal
+
+# APM dependencies
+apm_modules/
+.ruff_cache/
+apm.yml
+.github
+
